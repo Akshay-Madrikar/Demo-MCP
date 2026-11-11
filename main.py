@@ -755,12 +755,13 @@ class OpenAccessMiddleware:
             await self.app(scope, receive, send)
             return
 
-        path = scope.get("path", "")
+        # Normalize path by removing trailing slashes
+        path = scope.get("path", "").rstrip("/")
 
         if path == "/health":
             await _send_json(send, 200, {"status": "ok"})
             return
-        if path in ["/", "/dashboard"]:
+        if path in ("", "/dashboard"):
             await handle_dashboard(send)
             return
         if path == "/api/data":
