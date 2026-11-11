@@ -167,7 +167,6 @@ def load_data() -> None:
             _next_amc_id = raw.get("next_amc_id", 1)
             _next_service_id = raw.get("next_service_id", 1)
         except (json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
-            # Never overwrite a file we could not read: that would destroy data.
             raise RuntimeError(
                 f"Could not read data file {DATA_FILE!r}: {exc}. "
                 "Fix or move the file and restart."
@@ -628,7 +627,7 @@ def amc_resource(amc_id: str) -> str:
 
 
 # ==========================================================================
-# HTTP serving (public / Render) with optional bearer-token protection
+# HTTP serving with Browser Dashboard / API Data (No Token Required)
 # ==========================================================================
 async def _send_json(send, status: int, body: dict, extra_headers=None) -> None:
     payload = json.dumps(body).encode()
@@ -639,10 +638,76 @@ async def _send_json(send, status: int, body: dict, extra_headers=None) -> None:
     await send({"type": "http.response.body", "body": payload})
 
 
+async def handle_dashboard(send):
+    """HTML Web Dashboard - Public view of JSON file without tokens."""
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>AMC Data Viewer</title>
+      <style>
+        body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 24px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #334155; padding-bottom: 16px; }
+        h1 { margin: 0; color: #38bdf8; font-size: 24px; }
+        .btn { background: #0284c7; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+        .btn:hover { background: #0369a1; }
+        .meta { color: #94a3b8; font-size: 14px; margin-top: 4px; }
+        pre { background: #1e293b; padding: 20px; border-radius: 8px; border: 1px solid #334155; overflow-x: auto; font-size: 14px; color: #e2e8f0; line-height: 1.5; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <div>
+          <h1>AMC Tracker Live JSON Viewer</h1>
+          <div class="meta" id="status-meta">Fetching latest updates...</div>
+        </div>
+        <button class="btn" onclick="fetchData()">Manual Refresh</button>
+      </div>
+
+      <pre id="json-viewer">Loading JSON file...</pre>
+
+      <script>
+        async function fetchData() {
+          try {
+            const res = await fetch('/api/data');
+            const data = await res.json();
+            document.getElementById('json-viewer').textContent = JSON.stringify(data, null, 2);
+            document.getElementById('status-meta').textContent = "Auto-refreshing every 3s • Last updated: " + new Date().toLocaleTimeString();
+          } catch (err) {
+            document.getElementById('status-meta').textContent = "Failed to load data: " + err;
+          }
+        }
+
+        fetchData();
+        setInterval(fetchData, 3000);
+      </script>
+    </body>
+    </html>
+    """
+    payload = html_content.encode("utf-8")
+    headers = [
+        (b"content-type", b"text/html; charset=utf-8"),
+        (b"content-length", str(len(payload)).encode())
+    ]
+    await send({"type": "http.response.start", "status": 200, "headers": headers})
+    await send({"type": "http.response.body", "body": payload})
+
+
+async def handle_api_data(send):
+    """Raw JSON endpoint serving amc_data.json content."""
+    try:
+        with open(DATA_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+        await _send_json(send, 200, raw)
+    except Exception as exc:
+        await _send_json(send, 500, {"error": str(exc)})
+
+
 class TokenAuthMiddleware:
     """Pure ASGI middleware (safe for streaming responses).
-    /health is always open. If a token is configured everything else needs
-    it; if token is None, all requests are allowed."""
+    /health, dashboard, and /api/data are open. Everything else uses token auth if configured."""
 
     def __init__(self, app, token):
         self.app = app
@@ -653,8 +718,16 @@ class TokenAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if scope.get("path") == "/health":
+        path = scope.get("path", "")
+
+        if path == "/health":
             await _send_json(send, 200, {"status": "ok"})
+            return
+        if path in ["/", "/dashboard"]:
+            await handle_dashboard(send)
+            return
+        if path == "/api/data":
+            await handle_api_data(send)
             return
 
         supplied = dict(scope["headers"]).get(b"authorization", b"")
@@ -669,18 +742,13 @@ class TokenAuthMiddleware:
 
 
 def build_mcp_app():
-    """Starlette app for the MCP endpoint (/mcp). Tries the options available
-    in the newer SDK and falls back for older versions."""
-    # Public deployment: Host/Origin allow-listing (DNS-rebinding protection) is
-    # meant for localhost servers and can reject legitimate remote clients such
-    # as ChatGPT, so it is OFF by default. Set AMC_STRICT_HOSTS=1 plus
-    # AMC_EXTRA_HOSTS / the Render hostname to turn it on.
+    """Starlette app for the MCP endpoint (/mcp)."""
     host = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
     extra = [h.strip() for h in os.environ.get("AMC_EXTRA_HOSTS", "").split(",") if h.strip()]
     hosts = [h for h in [host, *extra] if h]
     strict = os.environ.get("AMC_STRICT_HOSTS", "0") == "1"
 
-    kwargs = {"stateless_http": True}  # tools are stateless; clean across restarts
+    kwargs = {"stateless_http": True}
     try:
         from mcp.server.transport_security import TransportSecuritySettings
         if strict and hosts:
@@ -715,9 +783,6 @@ def run_http() -> None:
             "No access control configured. Set AMC_API_TOKEN, or set "
             "AMC_ALLOW_NO_AUTH=1 to run without sign-in."
         )
-    if not api_token:
-        print("WARNING: running WITHOUT authentication. Anyone with the URL can "
-              "read and modify all data.", flush=True)
 
     app = TokenAuthMiddleware(build_mcp_app(), api_token or None)
     uvicorn.run(
