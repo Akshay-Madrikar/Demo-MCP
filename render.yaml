@@ -2,7 +2,7 @@ services:
   - type: web
     name: amc-tracker-mcp
     runtime: python
-    plan: starter            # persistent disks need a paid plan
+    plan: free            # persistent disks need a paid plan
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     healthCheckPath: /health
@@ -20,10 +20,4 @@ services:
       - key: AMC_CURRENCY
         value: INR
       - key: AMC_LOAD_SAMPLE
-        value: "0"
-      - key: AMC_DATA_FILE
-        value: /var/data/amc_data.json
-    disk:
-      name: amc-data
-      mountPath: /var/data
-      sizeGB: 1
+        value: "1"
