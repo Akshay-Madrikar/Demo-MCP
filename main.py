@@ -11,41 +11,14 @@ FEATURES
   3. Edit AMC details (including cancel / reinstate)
   4. Free services per contract year (default 4, configurable per AMC) with
      automatic free vs chargeable tracking
+  5. Interactive Browser Dashboard + Live JSON Editor (completely open, no tokens)
 
 STORAGE
   No database. Data is kept in Python dicts and saved to a JSON file after
   EVERY change (atomic write), so nothing is lost on restart.
   Default file: amc_data.json next to this script (override: AMC_DATA_FILE).
-
-HOW IT RUNS (AMC_TRANSPORT)
-  stdio  - local use with Claude Desktop / MCP Inspector   (default locally)
-  http   - public/remote server at /mcp, plus /health      (default when the
-           PORT env var exists, as on Render)
-
-ENVIRONMENT VARIABLES
-  AMC_BUSINESS_NAME   business name                         (first run default)
-  AMC_CURRENCY        e.g. INR, USD                         (first run default)
-  AMC_FREE_SERVICES   default free services per year, 4     (first run default)
-  AMC_LOAD_SAMPLE     1 = seed sample data on first run, 0 = start empty
-  AMC_DATA_FILE       path of the JSON data file (use /var/data/... on Render)
-  AMC_TRANSPORT       stdio | http
-  PORT                HTTP port (Render sets it)
-  Access control for http mode (choose one):
-  AMC_API_TOKEN       secret (24+ chars); clients send
-                      "Authorization: Bearer <token>"
-  AMC_ALLOW_NO_AUTH   1 = NO sign-in, anyone with the URL can read and change
-                      all data. Used only when no token is set.
-  AMC_STRICT_HOSTS    1 = enable Host/Origin allow-listing (needs AMC_EXTRA_HOSTS
-                      or the Render hostname). Off by default.
-  AMC_EXTRA_HOSTS     comma-separated extra hostnames (used with AMC_STRICT_HOSTS)
-
-RUN
-  Local:   python main.py                     (stdio)
-  Server:  AMC_TRANSPORT=http AMC_ALLOW_NO_AUTH=1 python main.py
-  Needs:   pip install mcp uvicorn
 """
 
-import hmac
 import json
 import os
 import re
@@ -68,7 +41,6 @@ DATA_FILE = os.environ.get(
 CONFIG = {
     "business_name": os.environ.get("AMC_BUSINESS_NAME", "My Business"),
     "currency": os.environ.get("AMC_CURRENCY", "INR"),
-    # Free services included per contract year. Each AMC can override this.
     "default_free_services_per_year": int(os.environ.get("AMC_FREE_SERVICES", "4")),
 }
 LOAD_SAMPLE_DATA = os.environ.get("AMC_LOAD_SAMPLE", "1") == "1"
@@ -86,7 +58,6 @@ _lock = threading.RLock()
 
 
 def _load_sample_data() -> None:
-    """Hard-coded sample data, used only on first run. Edit to suit."""
     AMCS.update({
         1: {"id": 1, "customer_name": "Sample Customer A", "mobile": "9820012345",
             "email": "customer.a@example.com", "start_date": "2026-03-15",
@@ -153,24 +124,22 @@ def save_data() -> None:
 
 
 def load_data() -> None:
-    """Load from DATA_FILE, or create it on first run."""
     global _next_amc_id, _next_service_id
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, encoding="utf-8") as f:
                 raw = json.load(f)
-            AMCS.update({int(k): v for k, v in raw["amcs"].items()})
-            SERVICES.update({int(k): v for k, v in raw["services"].items()})
+            AMCS.clear()
+            SERVICES.clear()
+            AMCS.update({int(k): v for k, v in raw.get("amcs", {}).items()})
+            SERVICES.update({int(k): v for k, v in raw.get("services", {}).items()})
             for k in PERSISTED_CONFIG_KEYS:
                 if k in raw.get("config", {}):
                     CONFIG[k] = raw["config"][k]
             _next_amc_id = raw.get("next_amc_id", 1)
             _next_service_id = raw.get("next_service_id", 1)
         except (json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
-            raise RuntimeError(
-                f"Could not read data file {DATA_FILE!r}: {exc}. "
-                "Fix or move the file and restart."
-            ) from exc
+            raise RuntimeError(f"Could not read data file {DATA_FILE!r}: {exc}") from exc
     elif LOAD_SAMPLE_DATA:
         _load_sample_data()
 
@@ -186,7 +155,7 @@ mcp = MCPServer(f"{CONFIG['business_name']} - AMC Tracker")
 
 
 # ==========================================================================
-# Helpers
+# Helpers & Tools
 # ==========================================================================
 def parse_date(value: str, field: str) -> date:
     try:
@@ -198,12 +167,11 @@ def parse_date(value: str, field: str) -> date:
 def add_years(d: date, n: int) -> date:
     try:
         return d.replace(year=d.year + n)
-    except ValueError:  # 29 Feb -> 28 Feb
+    except ValueError:
         return d.replace(year=d.year + n, day=28)
 
 
 def contract_year(start: date, on: date) -> int:
-    """Contract year number (1-based) that `on` falls into."""
     n = on.year - start.year
     if add_years(start, n) > on:
         n -= 1
@@ -262,7 +230,6 @@ def services_of(amc_id: int) -> list:
 
 
 def free_usage(amc: dict) -> list:
-    """Per-contract-year free service summary."""
     start = date.fromisoformat(amc["start_date"])
     end = date.fromisoformat(amc["end_date"])
     allowed = amc["free_services_per_year"]
@@ -282,8 +249,6 @@ def free_usage(amc: dict) -> list:
 
 
 def reassign_services(amc: dict) -> None:
-    """Recompute contract_year / is_free for all services of an AMC
-    (after date changes, quota changes or deletions)."""
     start = date.fromisoformat(amc["start_date"])
     allowed = amc["free_services_per_year"]
     counts: dict = {}
@@ -325,13 +290,8 @@ def amc_view(amc: dict, detail: bool = False) -> dict:
     return d
 
 
-# ==========================================================================
-# Tools: configuration
-# ==========================================================================
 @mcp.tool()
 def get_business_config() -> dict:
-    """Show the business settings this tracker is running with (business name,
-    currency, default free services per contract year) and the data file path."""
     return {**CONFIG, "data_file": DATA_FILE}
 
 
@@ -341,9 +301,6 @@ def update_business_config(
     currency: Optional[str] = None,
     default_free_services_per_year: Optional[int] = None,
 ) -> dict:
-    """Change business settings (saved to the data file). The default free
-    service count applies only to AMCs created afterwards; existing AMCs keep
-    their own value (change them with update_amc)."""
     with _lock:
         if business_name:
             CONFIG["business_name"] = business_name.strip()
@@ -356,9 +313,6 @@ def update_business_config(
     return {**CONFIG, "data_file": DATA_FILE}
 
 
-# ==========================================================================
-# Tools: AMC management
-# ==========================================================================
 @mcp.tool()
 def create_amc(
     customer_name: str,
@@ -372,9 +326,6 @@ def create_amc(
     free_services_per_year: Optional[int] = None,
     notes: Optional[str] = None,
 ) -> dict:
-    """Create a new AMC. Dates are YYYY-MM-DD. At least one of mobile/email is
-    required. covered_items = what the contract covers (equipment, site,
-    software...). free_services_per_year defaults to the business setting."""
     global _next_amc_id
     if not customer_name.strip():
         raise ValueError("customer_name is required.")
@@ -413,10 +364,6 @@ def list_amcs(
     search: Optional[str] = None,
     expiring_within_days: Optional[int] = None,
 ) -> list:
-    """View existing AMCs.
-    status: active | expired | upcoming | cancelled (optional)
-    search: match on customer name, mobile, email, plan or covered items
-    expiring_within_days: only active AMCs ending within N days (optional)"""
     result = []
     for amc in sorted(AMCS.values(), key=lambda a: a["end_date"]):
         st = status_of(amc)
@@ -439,8 +386,6 @@ def list_amcs(
 
 @mcp.tool()
 def get_amc(amc_id: int) -> dict:
-    """Full details of one AMC, including per-year free-service balance and
-    the complete service history."""
     return amc_view(get_amc_or_fail(amc_id), detail=True)
 
 
@@ -459,9 +404,6 @@ def update_amc(
     notes: Optional[str] = None,
     cancelled: Optional[bool] = None,
 ) -> dict:
-    """Edit AMC details. Only the fields you pass are changed. Use
-    cancelled=true to cancel (or false to reinstate). Dates cannot be changed
-    in a way that leaves recorded services outside the contract period."""
     with _lock:
         amc = get_amc_or_fail(amc_id)
 
@@ -514,9 +456,6 @@ def update_amc(
         return amc_view(amc, detail=True)
 
 
-# ==========================================================================
-# Tools: free-service tracking
-# ==========================================================================
 @mcp.tool()
 def record_service(
     amc_id: int,
@@ -524,9 +463,6 @@ def record_service(
     performed_by: Optional[str] = None,
     notes: Optional[str] = None,
 ) -> dict:
-    """Record a service visit for an AMC (defaults to today). It is counted
-    against that contract year's free services; once they are used up the
-    visit is marked as chargeable (is_free=false)."""
     global _next_service_id
     with _lock:
         amc = get_amc_or_fail(amc_id)
@@ -575,7 +511,6 @@ def record_service(
 
 @mcp.tool()
 def list_services(amc_id: int) -> dict:
-    """Service history and free-service balance for an AMC."""
     d = amc_view(get_amc_or_fail(amc_id), detail=True)
     return {
         "amc_id": amc_id,
@@ -587,8 +522,6 @@ def list_services(amc_id: int) -> dict:
 
 @mcp.tool()
 def delete_service(service_id: int) -> dict:
-    """Delete a wrongly entered service record. Free/chargeable flags are
-    re-evaluated so the free quota is restored."""
     with _lock:
         svc = SERVICES.pop(service_id, None)
         if not svc:
@@ -598,12 +531,8 @@ def delete_service(service_id: int) -> dict:
         return {"deleted": service_id, "amc_id": svc["amc_id"]}
 
 
-# ==========================================================================
-# Resources
-# ==========================================================================
 @mcp.resource("amc://{amc_id}")
 def amc_resource(amc_id: str) -> str:
-    """Readable summary of one AMC and its services."""
     d = amc_view(get_amc_or_fail(int(amc_id)), detail=True)
     amount = f"{d['currency']} {d['amount']:,.2f}" if d["amount"] is not None else "-"
     lines = [
@@ -627,75 +556,146 @@ def amc_resource(amc_id: str) -> str:
 
 
 # ==========================================================================
-# HTTP serving with Browser Dashboard / API Data (No Token Required)
+# HTTP Serving & Interactive Browser Dashboard (Open Access - No Tokens)
 # ==========================================================================
 async def _send_json(send, status: int, body: dict, extra_headers=None) -> None:
-    payload = json.dumps(body).encode()
-    headers = [(b"content-type", b"application/json"),
+    payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    headers = [(b"content-type", b"application/json; charset=utf-8"),
                (b"content-length", str(len(payload)).encode())]
     headers += extra_headers or []
     await send({"type": "http.response.start", "status": status, "headers": headers})
     await send({"type": "http.response.body", "body": payload})
 
 
-# async def handle_dashboard(send):
-#     """HTML Web Dashboard - Public view of JSON file without tokens."""
-#     html_content = """
-#     <!DOCTYPE html>
-#     <html lang="en">
-#     <head>
-#       <meta charset="UTF-8">
-#       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-#       <title>AMC Data Viewer</title>
-#       <style>
-#         body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 24px; }
-#         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #334155; padding-bottom: 16px; }
-#         h1 { margin: 0; color: #38bdf8; font-size: 24px; }
-#         .btn { background: #0284c7; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
-#         .btn:hover { background: #0369a1; }
-#         .meta { color: #94a3b8; font-size: 14px; margin-top: 4px; }
-#         pre { background: #1e293b; padding: 20px; border-radius: 8px; border: 1px solid #334155; overflow-x: auto; font-size: 14px; color: #e2e8f0; line-height: 1.5; }
-#       </style>
-#     </head>
-#     <body>
-#       <div class="header">
-#         <div>
-#           <h1>AMC Tracker Live JSON Viewer</h1>
-#           <div class="meta" id="status-meta">Fetching latest updates...</div>
-#         </div>
-#         <button class="btn" onclick="fetchData()">Manual Refresh</button>
-#       </div>
-#
-#       <pre id="json-viewer">Loading JSON file...</pre>
-#
-#       <script>
-#         async function fetchData() {
-#           try {
-#             const res = await fetch('/api/data');
-#             const data = await res.json();
-#             document.getElementById('json-viewer').textContent = JSON.stringify(data, null, 2);
-#             document.getElementById('status-meta').textContent = "Auto-refreshing every 3s • Last updated: " + new Date().toLocaleTimeString();
-#           } catch (err) {
-#             document.getElementById('status-meta').textContent = "Failed to load data: " + err;
-#           }
-#         }
-#
-#         fetchData();
-#         setInterval(fetchData, 3000);
-#       </script>
-#     </body>
-#     </html>
-#     """
-#     payload = html_content.encode("utf-8")
-#     headers = [
-#         (b"content-type", b"text/html; charset=utf-8"),
-#         (b"content-length", str(len(payload)).encode())
-#     ]
-#     await send({"type": "http.response.start", "status": 200, "headers": headers})
-#     await send({"type": "http.response.body", "body": payload})
-
 async def handle_dashboard(send):
-    html_content = """<!DOCTYPE html>...""" # (your dashboard HTML)
+    """HTML Web Viewer & JSON Editor for Browser."""
+    html_content = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AMC JSON Manager & Live Viewer</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 24px; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #334155; padding-bottom: 16px; }
+    h1 { margin: 0; color: #38bdf8; font-size: 24px; }
+    .meta { color: #94a3b8; font-size: 14px; margin-top: 4px; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .tab-btn { background: #1e293b; color: #94a3b8; border: 1px solid #334155; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+    .tab-btn.active { background: #0284c7; color: white; border-color: #0284c7; }
+    .actions { display: flex; gap: 10px; }
+    .btn { background: #0284c7; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 14px; }
+    .btn:hover { background: #0369a1; }
+    .btn-save { background: #16a34a; }
+    .btn-save:hover { background: #15803d; }
+    .alert { padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; display: none; font-size: 14px; }
+    .alert-success { background: #14532d; color: #4ade80; border: 1px solid #166534; }
+    .alert-error { background: #450a0a; color: #f87171; border: 1px solid #991b1b; }
+    pre, textarea { width: 100%; box-sizing: border-box; background: #1e293b; padding: 16px; border-radius: 8px; border: 1px solid #334155; font-family: "Courier New", monospace; font-size: 14px; color: #e2e8f0; line-height: 1.5; min-height: 500px; }
+    textarea { resize: vertical; outline: none; }
+    textarea:focus { border-color: #38bdf8; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>AMC Tracker JSON Manager</h1>
+      <div class="meta" id="status-meta">Connected to live server (Public Access)</div>
+    </div>
+    <div class="actions">
+      <button class="btn" onclick="fetchData()">Refresh</button>
+      <button class="btn btn-save" onclick="saveData()">Save Changes</button>
+    </div>
+  </div>
+
+  <div id="alert" class="alert"></div>
+
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-view-btn" onclick="switchTab('view')">Live View</button>
+    <button class="tab-btn" id="tab-edit-btn" onclick="switchTab('edit')">JSON Editor</button>
+  </div>
+
+  <div id="view-mode">
+    <pre id="json-viewer">Loading JSON file...</pre>
+  </div>
+
+  <div id="edit-mode" style="display: none;">
+    <textarea id="json-editor" placeholder="Paste or edit JSON content here..."></textarea>
+  </div>
+
+  <script>
+    let activeTab = 'view';
+
+    function showAlert(msg, isError = false) {
+      const el = document.getElementById('alert');
+      el.textContent = msg;
+      el.className = 'alert ' + (isError ? 'alert-error' : 'alert-success');
+      el.style.display = 'block';
+      setTimeout(() => { el.style.display = 'none'; }, 5000);
+    }
+
+    function switchTab(tab) {
+      activeTab = tab;
+      document.getElementById('tab-view-btn').className = 'tab-btn ' + (tab === 'view' ? 'active' : '');
+      document.getElementById('tab-edit-btn').className = 'tab-btn ' + (tab === 'edit' ? 'active' : '');
+      document.getElementById('view-mode').style.display = tab === 'view' ? 'block' : 'none';
+      document.getElementById('edit-mode').style.display = tab === 'edit' ? 'block' : 'none';
+      if (tab === 'edit') {
+        document.getElementById('json-editor').value = document.getElementById('json-viewer').textContent;
+      }
+    }
+
+    async function fetchData() {
+      try {
+        const res = await fetch('/api/data');
+        if (!res.ok) throw new Error('HTTP status ' + res.status);
+        const data = await res.json();
+        const formatted = JSON.stringify(data, null, 2);
+        document.getElementById('json-viewer').textContent = formatted;
+        if (activeTab === 'edit' && document.activeElement !== document.getElementById('json-editor')) {
+          document.getElementById('json-editor').value = formatted;
+        }
+        document.getElementById('status-meta').textContent = 'Last synced: ' + new Date().toLocaleTimeString();
+      } catch (err) {
+        document.getElementById('status-meta').textContent = 'Error: ' + err.message;
+        showAlert('Failed to fetch JSON data: ' + err.message, true);
+      }
+    }
+
+    async function saveData() {
+      const rawText = activeTab === 'edit' 
+        ? document.getElementById('json-editor').value 
+        : document.getElementById('json-viewer').textContent;
+
+      let parsed;
+      try {
+        parsed = JSON.parse(rawText);
+      } catch (err) {
+        showAlert('Invalid JSON syntax: ' + err.message, true);
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/data', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(parsed)
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || 'Failed to update');
+        
+        showAlert('JSON file updated successfully!');
+        fetchData();
+      } catch (err) {
+        showAlert('Save error: ' + err.message, true);
+      }
+    }
+
+    fetchData();
+    setInterval(() => { if (activeTab === 'view') fetchData(); }, 4000);
+  </script>
+</body>
+</html>"""
     payload = html_content.encode("utf-8")
     headers = [
         (b"content-type", b"text/html; charset=utf-8"),
@@ -704,39 +704,54 @@ async def handle_dashboard(send):
     await send({"type": "http.response.start", "status": 200, "headers": headers})
     await send({"type": "http.response.body", "body": payload})
 
-# async def handle_api_data(send):
-#     """Raw JSON endpoint serving amc_data.json content."""
-#     try:
-#         with open(DATA_FILE, encoding="utf-8") as f:
-#             raw = json.load(f)
-#         await _send_json(send, 200, raw)
-#     except Exception as exc:
-#         await _send_json(send, 500, {"error": str(exc)})
 
-async def handle_api_data(send):
-    try:
-        with open(DATA_FILE, encoding="utf-8") as f:
-            raw = json.load(f)
-        payload = json.dumps(raw, ensure_ascii=False).encode("utf-8")
-        headers = [
-            (b"content-type", b"application/json; charset=utf-8"),
-            (b"content-length", str(len(payload)).encode())
-        ]
-        await send({"type": "http.response.start", "status": 200, "headers": headers})
-        await send({"type": "http.response.body", "body": payload})
-    except Exception as exc:
-        await _send_json(send, 500, {"error": str(exc)})
+async def handle_api_data(scope, receive, send):
+    method = scope.get("method", "GET").upper()
 
-class TokenAuthMiddleware:
-    """Pure ASGI middleware (safe for streaming responses).
-    /health, dashboard, and /api/data are open. Everything else uses token auth if configured."""
+    if method == "GET":
+        try:
+            with open(DATA_FILE, encoding="utf-8") as f:
+                raw = json.load(f)
+            await _send_json(send, 200, raw)
+        except Exception as exc:
+            await _send_json(send, 500, {"error": str(exc)})
+        return
 
-    def __init__(self, app, token):
+    if method == "POST":
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.request":
+                body.extend(message.get("body", b""))
+                if not message.get("more_body", False):
+                    break
+
+        try:
+            new_data = json.loads(body.decode("utf-8"))
+            if not isinstance(new_data, dict) or "amcs" not in new_data or "services" not in new_data:
+                await _send_json(send, 400, {"error": "Invalid format: payload must include 'amcs' and 'services' keys."})
+                return
+
+            with _lock:
+                with open(DATA_FILE, "w", encoding="utf-8") as f:
+                    json.dump(new_data, f, indent=2, ensure_ascii=False)
+                load_data()
+
+            await _send_json(send, 200, {"status": "ok", "message": "File updated and reloaded."})
+        except json.JSONDecodeError as err:
+            await _send_json(send, 400, {"error": f"JSON Decode Error: {str(err)}"})
+        except Exception as exc:
+            await _send_json(send, 500, {"error": str(exc)})
+
+
+class OpenAccessMiddleware:
+    """Pure ASGI middleware allowing completely public access without any tokens."""
+
+    def __init__(self, app):
         self.app = app
-        self.expected = f"Bearer {token}".encode() if token else None
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":  # lifespan events etc. pass straight through
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
@@ -749,40 +764,19 @@ class TokenAuthMiddleware:
             await handle_dashboard(send)
             return
         if path == "/api/data":
-            await handle_api_data(send)
-            return
-
-        supplied = dict(scope["headers"]).get(b"authorization", b"")
-        if self.expected is not None and not hmac.compare_digest(supplied, self.expected):
-            await _send_json(
-                send, 401, {"error": "unauthorized"},
-                [(b"www-authenticate", b'Bearer realm="amc-tracker"')],
-            )
+            await handle_api_data(scope, receive, send)
             return
 
         await self.app(scope, receive, send)
 
 
 def build_mcp_app():
-    """Starlette app for the MCP endpoint (/mcp)."""
-    host = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
-    extra = [h.strip() for h in os.environ.get("AMC_EXTRA_HOSTS", "").split(",") if h.strip()]
-    hosts = [h for h in [host, *extra] if h]
-    strict = os.environ.get("AMC_STRICT_HOSTS", "0") == "1"
-
     kwargs = {"stateless_http": True}
     try:
         from mcp.server.transport_security import TransportSecuritySettings
-        if strict and hosts:
-            kwargs["transport_security"] = TransportSecuritySettings(
-                enable_dns_rebinding_protection=True,
-                allowed_hosts=[x for h in hosts for x in (h, f"{h}:*")],
-                allowed_origins=[f"https://{h}" for h in hosts],
-            )
-        else:
-            kwargs["transport_security"] = TransportSecuritySettings(
-                enable_dns_rebinding_protection=False
-            )
+        kwargs["transport_security"] = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        )
     except ImportError:
         pass
 
@@ -795,18 +789,7 @@ def build_mcp_app():
 def run_http() -> None:
     import uvicorn
 
-    api_token = os.environ.get("AMC_API_TOKEN", "").strip()
-    allow_no_auth = os.environ.get("AMC_ALLOW_NO_AUTH", "0") == "1"
-
-    if api_token and len(api_token) < 24:
-        raise RuntimeError("AMC_API_TOKEN must be at least 24 characters.")
-    if not api_token and not allow_no_auth:
-        raise RuntimeError(
-            "No access control configured. Set AMC_API_TOKEN, or set "
-            "AMC_ALLOW_NO_AUTH=1 to run without sign-in."
-        )
-
-    app = TokenAuthMiddleware(build_mcp_app(), api_token or None)
+    app = OpenAccessMiddleware(build_mcp_app())
     uvicorn.run(
         app,
         host="0.0.0.0",
@@ -816,9 +799,6 @@ def run_http() -> None:
     )
 
 
-# ==========================================================================
-# Entry point
-# ==========================================================================
 if __name__ == "__main__":
     transport = os.environ.get("AMC_TRANSPORT") or ("http" if os.environ.get("PORT") else "stdio")
     if transport.lower() == "stdio":
