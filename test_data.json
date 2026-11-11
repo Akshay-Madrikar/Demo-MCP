@@ -1,0 +1,133 @@
+{
+  "config": {
+    "business_name": "My Business",
+    "currency": "INR",
+    "default_free_services_per_year": 4
+  },
+  "next_amc_id": 5,
+  "next_service_id": 8,
+  "amcs": {
+    "1": {
+      "id": 1,
+      "customer_name": "Sample Customer A",
+      "mobile": "9820012345",
+      "email": "customer.a@example.com",
+      "start_date": "2026-03-15",
+      "end_date": "2027-03-14",
+      "covered_items": "Equipment set (3 units)",
+      "plan_name": "Gold",
+      "amount": 12000.0,
+      "free_services_per_year": 4,
+      "notes": "",
+      "cancelled": false
+    },
+    "2": {
+      "id": 2,
+      "customer_name": "Sample Customer B",
+      "mobile": "9930067890",
+      "email": null,
+      "start_date": "2025-12-01",
+      "end_date": "2026-11-30",
+      "covered_items": "Main unit",
+      "plan_name": "Standard",
+      "amount": 6000.0,
+      "free_services_per_year": 4,
+      "notes": "Renewal due soon",
+      "cancelled": false
+    },
+    "3": {
+      "id": 3,
+      "customer_name": "Sample Company C",
+      "mobile": null,
+      "email": "accounts@company-c.example.com",
+      "start_date": "2024-06-01",
+      "end_date": "2025-05-31",
+      "covered_items": "Office equipment",
+      "plan_name": "Basic",
+      "amount": 4000.0,
+      "free_services_per_year": 2,
+      "notes": "Expired - renewal pending",
+      "cancelled": false
+    },
+    "4": {
+      "id": 4,
+      "customer_name": "Sample Customer D",
+      "mobile": "9769011223",
+      "email": "customer.d@example.com",
+      "start_date": "2027-01-01",
+      "end_date": "2027-12-31",
+      "covered_items": "Server + network",
+      "plan_name": "Gold",
+      "amount": 15000.0,
+      "free_services_per_year": 4,
+      "notes": "Starts next year",
+      "cancelled": false
+    }
+  },
+  "services": {
+    "1": {
+      "id": 1,
+      "amc_id": 1,
+      "service_date": "2026-04-20",
+      "contract_year": 1,
+      "is_free": true,
+      "performed_by": "Staff 1",
+      "notes": "Routine service"
+    },
+    "2": {
+      "id": 2,
+      "amc_id": 1,
+      "service_date": "2026-07-18",
+      "contract_year": 1,
+      "is_free": true,
+      "performed_by": "Staff 1",
+      "notes": "Routine service"
+    },
+    "3": {
+      "id": 3,
+      "amc_id": 2,
+      "service_date": "2026-01-25",
+      "contract_year": 1,
+      "is_free": true,
+      "performed_by": "Staff 2",
+      "notes": ""
+    },
+    "4": {
+      "id": 4,
+      "amc_id": 2,
+      "service_date": "2026-04-30",
+      "contract_year": 1,
+      "is_free": true,
+      "performed_by": "Staff 2",
+      "notes": ""
+    },
+    "5": {
+      "id": 5,
+      "amc_id": 2,
+      "service_date": "2026-08-02",
+      "contract_year": 1,
+      "is_free": true,
+      "performed_by": "Staff 2",
+      "notes": ""
+    },
+    "6": {
+      "id": 6,
+      "amc_id": 2,
+      "service_date": "2026-09-10",
+      "contract_year": 1,
+      "is_free": true,
+      "performed_by": "Staff 2",
+      "notes": ""
+    },
+    "7": {
+      "id": 7,
+      "amc_id": 2,
+      "service_date": "2026-10-15",
+      "contract_year": 1,
+      "is_free": false,
+      "performed_by": "Staff 2",
+      "notes": "Extra visit - chargeable"
+    }
+  },
+  "saved_at": "2026-11-11T09:32:28"
+}

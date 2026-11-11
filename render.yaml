@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: amc-tracker-mcp
+    runtime: python
+    plan: starter            # persistent disks need a paid plan
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: AMC_TRANSPORT
+        value: http
+      - key: PORT
+        value: "10000"
+      - key: AMC_ALLOW_NO_AUTH   # open access, no sign-in
+        value: "1"             # to lock it later: add AMC_API_TOKEN and redeploy
+      - key: AMC_BUSINESS_NAME
+        value: My Business
+      - key: AMC_CURRENCY
+        value: INR
+      - key: AMC_LOAD_SAMPLE
+        value: "0"
+      - key: AMC_DATA_FILE
+        value: /var/data/amc_data.json
+    disk:
+      name: amc-data
+      mountPath: /var/data
+      sizeGB: 1
