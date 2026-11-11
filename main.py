@@ -35,7 +35,9 @@ ENVIRONMENT VARIABLES
                       "Authorization: Bearer <token>"
   AMC_ALLOW_NO_AUTH   1 = NO sign-in, anyone with the URL can read and change
                       all data. Used only when no token is set.
-  AMC_EXTRA_HOSTS     comma-separated extra hostnames (custom domain)
+  AMC_STRICT_HOSTS    1 = enable Host/Origin allow-listing (needs AMC_EXTRA_HOSTS
+                      or the Render hostname). Off by default.
+  AMC_EXTRA_HOSTS     comma-separated extra hostnames (used with AMC_STRICT_HOSTS)
 
 RUN
   Local:   python main.py                     (stdio)
@@ -669,21 +671,30 @@ class TokenAuthMiddleware:
 def build_mcp_app():
     """Starlette app for the MCP endpoint (/mcp). Tries the options available
     in the newer SDK and falls back for older versions."""
+    # Public deployment: Host/Origin allow-listing (DNS-rebinding protection) is
+    # meant for localhost servers and can reject legitimate remote clients such
+    # as ChatGPT, so it is OFF by default. Set AMC_STRICT_HOSTS=1 plus
+    # AMC_EXTRA_HOSTS / the Render hostname to turn it on.
     host = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
     extra = [h.strip() for h in os.environ.get("AMC_EXTRA_HOSTS", "").split(",") if h.strip()]
     hosts = [h for h in [host, *extra] if h]
+    strict = os.environ.get("AMC_STRICT_HOSTS", "0") == "1"
 
     kwargs = {"stateless_http": True}  # tools are stateless; clean across restarts
-    if hosts:
-        try:
-            from mcp.server.transport_security import TransportSecuritySettings
+    try:
+        from mcp.server.transport_security import TransportSecuritySettings
+        if strict and hosts:
             kwargs["transport_security"] = TransportSecuritySettings(
                 enable_dns_rebinding_protection=True,
                 allowed_hosts=[x for h in hosts for x in (h, f"{h}:*")],
                 allowed_origins=[f"https://{h}" for h in hosts],
             )
-        except ImportError:
-            pass
+        else:
+            kwargs["transport_security"] = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            )
+    except ImportError:
+        pass
 
     try:
         return mcp.streamable_http_app(**kwargs)
